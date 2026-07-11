@@ -2,7 +2,7 @@ name: Check Facebook page for new posts
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # 每 30 分鐘檢查一次，可依需求調整
+    - cron: "*/30 * * * *"   # 每 30 分鐘檢查一次，可依需求調整
   workflow_dispatch: {}       # 允許在 GitHub 網頁上手動點擊執行，方便測試
 
 permissions:
