@@ -23,7 +23,7 @@ from bs4 import BeautifulSoup
 # 可以用環境變數 FB_PAGE_URL 覆蓋，不一定要改這裡
 FB_PAGE_URL = os.environ.get(
     "FB_PAGE_URL",
-    "https://mbasic.facebook.com/tspca.ruifang",  # <-- 請改成實際的粉專 mbasic 網址
+    "https://www.facebook.com/Ruifang.Volunteers",  # <-- 請改成實際的粉專 mbasic 網址
 )
 
 # ntfy 的 topic 名稱，等於是你的「通知頻道密碼」，從 GitHub Secrets 讀取
