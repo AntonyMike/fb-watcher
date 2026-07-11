@@ -32,7 +32,7 @@
 ```python
 FB_PAGE_URL = os.environ.get(
     "FB_PAGE_URL",
-    "https://mbasic.facebook.com/tspca.ruifang",  # <-- 請改成實際的粉專 mbasic 網址
+    "[https://mbasic.facebook.com/tspca.ruifang](https://www.facebook.com/Ruifang.Volunteers)",  # <-- 請改成實際的粉專 mbasic 網址
 )
 ```
 
