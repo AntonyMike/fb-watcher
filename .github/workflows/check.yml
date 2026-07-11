@@ -1,0 +1,35 @@
+name: Check Facebook page for new posts
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # 每 30 分鐘檢查一次，可依需求調整
+  workflow_dispatch: {}       # 允許在 GitHub 網頁上手動點擊執行，方便測試
+
+permissions:
+  contents: write            # 讓 Action 可以把 state.json 的更新 commit 回 repo
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安裝套件
+        run: pip install requests beautifulsoup4
+
+      - name: 執行檢查
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python check_facebook_page.py
+
+      - name: 把最新狀態存回 repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          git diff --cached --quiet || git commit -m "update state"
+          git push
