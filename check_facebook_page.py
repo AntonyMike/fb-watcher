@@ -18,6 +18,7 @@
 import hashlib
 import json
 import os
+import re
 import sys
 import urllib.parse
 from pathlib import Path
@@ -25,16 +26,26 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
-# ---- 設定區：把下面這個網址換成你要追蹤的粉專的完整網址 ----
-# 例如 https://www.facebook.com/tspca.ruifang
-# 可以用環境變數 FB_PAGE_URL 覆蓋，不一定要改這裡
+# ==================== 設定區 ====================
+
+# 把下面這個網址換成你要追蹤的粉專的完整網址
 FB_PAGE_URL = os.environ.get(
     "FB_PAGE_URL",
-    "https://www.facebook.com/Ruifang.Volunteers",  # <-- 請改成實際的粉專網址
+    "https://www.facebook.com/Ruifang.Volunteers",
 )
 
 # ntfy 的 topic 名稱，等於是你的「通知頻道密碼」，從 GitHub Secrets 讀取
 NTFY_TOPIC = os.environ["NTFY_TOPIC"]
+
+# 用來判斷「這是志工招募文」的關鍵字，符合就會用招募專屬的標題格式
+RECRUITMENT_KEYWORDS = ["志工", "招募"]
+
+# ==== 想改通知的文字內容，就改下面這幾行 ====
+NOTIFY_TITLE_RECRUITMENT = "🐾 瑞芳志工隊{month}招募公佈了！"   # {month} 會自動代入「7月」這種格式，抓不到月份就是空字串
+NOTIFY_TITLE_GENERIC = "瑞芳志工隊粉專有新貼文"
+NOTIFY_TAGS = "dog,bell"
+NOTIFY_PRIORITY = "high"
+# ==============================================
 
 STATE_FILE = Path("state.json")
 
@@ -47,18 +58,47 @@ HEADERS = {
     "Accept-Language": "zh-TW,zh;q=0.9",
 }
 
+# 常見的網站介面文字（登入、隱私權等），用來過濾掉不是貼文內容的雜訊
+JUNK_MARKERS = [
+    "登入", "註冊", "忘記密碼", "隱私權", "使用條款", "Cookie",
+    "繼續使用行動版網站", "建立粉絲專頁", "English (US)",
+]
+
+
+# ==================== 抓取邏輯 ====================
 
 def _looks_like_login_wall(resp):
     return "login" in resp.url.lower() or "登入" in resp.text[:800]
 
 
-def _extract_text_blocks(soup):
-    candidate_divs = soup.find_all("div")
-    return [
-        d.get_text(" ", strip=True)
-        for d in candidate_divs
-        if d.get_text(strip=True) and len(d.get_text(strip=True)) > 15
-    ]
+def _extract_candidates(soup):
+    """抓出頁面裡所有夠長的文字區塊，過濾掉常見的網站介面雜訊"""
+    candidates = []
+    for d in soup.find_all("div"):
+        text = d.get_text(" ", strip=True)
+        if len(text) <= 15:
+            continue
+        if any(marker in text for marker in JUNK_MARKERS) and len(text) < 60:
+            # 短的雜訊文字直接跳過；長文字裡偶爾出現這些字也不該整段丟掉
+            continue
+        candidates.append(text)
+    return candidates
+
+
+def _pick_best_post_text(candidates):
+    """貼文本文通常是頁面裡最長的一段連續文字，所以取最長的當作最可能的貼文內容"""
+    if not candidates:
+        return ""
+    return max(candidates, key=len)
+
+
+def _extract_post_link(soup, base_url):
+    """嘗試找出貼文的永久連結，讓通知可以直接點進去看原文"""
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if any(marker in href for marker in ("/posts/", "/photos/", "story_fbid", "permalink.php")):
+            return urllib.parse.urljoin(base_url, href)
+    return base_url
 
 
 def _try_page_plugin():
@@ -75,10 +115,13 @@ def _try_page_plugin():
         raise RuntimeError("方案一（Page Plugin）也被導向登入頁面。")
 
     soup = BeautifulSoup(resp.text, "html.parser")
-    text_blocks = _extract_text_blocks(soup)
-    if not text_blocks:
+    candidates = _extract_candidates(soup)
+    if not candidates:
         raise RuntimeError("方案一（Page Plugin）抓到的頁面沒有可用文字內容。")
-    return text_blocks[0]
+
+    best_text = _pick_best_post_text(candidates)
+    link = _extract_post_link(soup, "https://www.facebook.com")
+    return best_text, link
 
 
 def _try_mbasic():
@@ -92,21 +135,24 @@ def _try_mbasic():
         raise RuntimeError("方案二（mbasic）也被導向登入頁面。")
 
     soup = BeautifulSoup(resp.text, "html.parser")
-    text_blocks = _extract_text_blocks(soup)
-    if not text_blocks:
-        text_blocks = [soup.get_text(" ", strip=True)[:2000]]
-    return text_blocks[0]
+    candidates = _extract_candidates(soup)
+    if not candidates:
+        candidates = [soup.get_text(" ", strip=True)[:2000]]
+
+    best_text = _pick_best_post_text(candidates)
+    link = _extract_post_link(soup, mbasic_url)
+    return best_text, link
 
 
-def fetch_latest_post_signature():
-    """依序嘗試各種抓取方式，回傳 (內容指紋 hash, 用於通知的文字預覽)"""
+def fetch_latest_post():
+    """依序嘗試各種抓取方式，回傳 (內容指紋 hash, 貼文文字, 貼文連結)"""
     errors = []
     for attempt_name, attempt_fn in (("Page Plugin", _try_page_plugin), ("mbasic", _try_mbasic)):
         try:
-            latest_text = attempt_fn()
+            text, link = attempt_fn()
             print(f"[{attempt_name}] 抓取成功")
-            signature = hashlib.sha256(latest_text.encode("utf-8")).hexdigest()
-            return signature, latest_text[:200]
+            signature = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            return signature, text, link
         except Exception as e:
             print(f"[{attempt_name}] 失敗：{e}", file=sys.stderr)
             errors.append(f"{attempt_name}: {e}")
@@ -115,6 +161,20 @@ def fetch_latest_post_signature():
         "所有抓取方式都失敗了，Facebook 目前擋下了雲端 IP 的請求。詳細：" + " | ".join(errors)
     )
 
+
+# ==================== 內容解析 ====================
+
+def parse_recruitment_info(text):
+    """判斷是不是志工招募文，並且盡量抓出月份，例如貼文開頭常見的 [7月]"""
+    is_recruitment = any(kw in text for kw in RECRUITMENT_KEYWORDS)
+
+    month_match = re.search(r"\[?\s*(\d{1,2})\s*月\s*\]?", text)
+    month_label = f"{month_match.group(1)}月" if month_match else ""
+
+    return is_recruitment, month_label
+
+
+# ==================== 狀態存取 ====================
 
 def load_last_signature():
     if STATE_FILE.exists():
@@ -129,22 +189,36 @@ def save_signature(signature):
     STATE_FILE.write_text(json.dumps({"last_signature": signature}, ensure_ascii=False))
 
 
-def send_notification(preview_text):
+# ==================== 發送通知 ====================
+
+def send_notification(text, link):
+    is_recruitment, month_label = parse_recruitment_info(text)
+
+    if is_recruitment:
+        title = NOTIFY_TITLE_RECRUITMENT.format(month=month_label)
+    else:
+        title = NOTIFY_TITLE_GENERIC
+
+    preview = text[:300]  # 通知內文只放前 300 字，太長手機也顯示不完
+
     requests.post(
         f"https://ntfy.sh/{NTFY_TOPIC}",
-        data=preview_text.encode("utf-8"),
+        data=preview.encode("utf-8"),
         headers={
-            "Title": "瑞芳志工隊粉專可能有新貼文".encode("utf-8"),
-            "Priority": "high",
-            "Tags": "dog,bell",
+            "Title": title.encode("utf-8"),
+            "Priority": NOTIFY_PRIORITY,
+            "Tags": NOTIFY_TAGS,
+            "Click": link,  # 點通知會直接開啟這個連結
         },
         timeout=10,
     )
 
 
+# ==================== 主流程 ====================
+
 def main():
     try:
-        signature, preview_text = fetch_latest_post_signature()
+        signature, text, link = fetch_latest_post()
     except Exception as e:
         print(f"抓取失敗：{e}", file=sys.stderr)
         sys.exit(1)
@@ -158,7 +232,7 @@ def main():
 
     if signature != last_signature:
         print("偵測到內容變化，發送通知！")
-        send_notification(preview_text)
+        send_notification(text, link)
         save_signature(signature)
     else:
         print("沒有變化。")
