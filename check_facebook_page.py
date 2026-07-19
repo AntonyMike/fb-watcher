@@ -130,17 +130,43 @@ def _fetch_candidates_mbasic():
     return [(text, link) for text in candidates]
 
 
-def _matches_this_month_recruitment(text):
-    """必須同時符合：包含指定文字、月份標記等於現在的月份"""
-    if REQUIRED_PHRASE not in text:
-        return False
+def _next_month(year, month):
+    """回傳下個月的 (年, 月)，處理跨年（12月 -> 隔年1月）"""
+    if month == 12:
+        return year + 1, 1
+    return year, month + 1
 
+
+def _extract_month_number(text):
+    """從文字裡抓出 [8月] 這種月份標記，回傳數字，抓不到回傳 None"""
     month_match = re.search(r"\[\s*(\d{1,2})\s*月\s*\]", text)
-    if not month_match:
-        return False
+    return int(month_match.group(1)) if month_match else None
 
-    current_month = datetime.datetime.now().month
-    return int(month_match.group(1)) == current_month
+
+def _matches_this_month_recruitment(text):
+    """
+    必須同時符合：
+      1. 包含指定文字
+      2. 月份標記等於「這個月」或「下個月」
+         （因為這個粉專習慣提前一個月公告，例如 7 月中發 [8月] 的招募文）
+    符合的話，回傳這則貼文對應的年月字串（例如 "2026-08"）；不符合回傳 None。
+    """
+    if REQUIRED_PHRASE not in text:
+        return None
+
+    post_month = _extract_month_number(text)
+    if post_month is None:
+        return None
+
+    now = datetime.datetime.now()
+    if post_month == now.month:
+        return f"{now.year}-{now.month:02d}"
+
+    next_year, next_month = _next_month(now.year, now.month)
+    if post_month == next_month:
+        return f"{next_year}-{next_month:02d}"
+
+    return None
 
 
 def fetch_matching_post():
@@ -171,10 +197,15 @@ def fetch_matching_post():
             "所有抓取方式都失敗了，Facebook 目前擋下了雲端 IP 的請求。詳細：" + " | ".join(fetch_errors)
         )
 
-    matches = [(t, l) for t, l in all_candidates if _matches_this_month_recruitment(t)]
+    matches = []
+    for text, link in all_candidates:
+        year_month = _matches_this_month_recruitment(text)
+        if year_month is not None:
+            matches.append((text, link, year_month))
+
     if not matches:
         return None
-    return max(matches, key=lambda pair: len(pair[0]))
+    return max(matches, key=lambda item: len(item[0]))
 
 
 # ==================== 狀態存取（記錄「這個月通知過了沒」） ====================
@@ -194,9 +225,9 @@ def save_last_notified_month(year_month):
 
 # ==================== 發送通知 ====================
 
-def send_notification(text, link):
-    current_month = datetime.datetime.now().month
-    title = NOTIFY_TITLE.format(month=f"{current_month}月")
+def send_notification(text, link, year_month):
+    month_number = int(year_month.split("-")[1])
+    title = NOTIFY_TITLE.format(month=f"{month_number}月")
     preview = text[:300]
 
     requests.post(
@@ -222,21 +253,19 @@ def main():
         sys.exit(1)
 
     if match is None:
-        print("這次沒有偵測到符合條件（本月 + 指定文字）的貼文，不發通知。")
+        print("這次沒有偵測到符合條件（本月或下月 + 指定文字）的貼文，不發通知。")
         return
 
-    now = datetime.datetime.now()
-    current_year_month = f"{now.year}-{now.month:02d}"
+    text, link, year_month = match
     last_notified = load_last_notified_month()
 
-    if last_notified == current_year_month:
-        print(f"符合條件，但 {current_year_month} 已經通知過了，不重複發送。")
+    if last_notified == year_month:
+        print(f"符合條件，但 {year_month} 已經通知過了，不重複發送。")
         return
 
-    text, link = match
-    print(f"偵測到符合條件的貼文，且 {current_year_month} 還沒通知過，發送通知！")
-    send_notification(text, link)
-    save_last_notified_month(current_year_month)
+    print(f"偵測到符合條件的貼文（{year_month}），且還沒通知過，發送通知！")
+    send_notification(text, link, year_month)
+    save_last_notified_month(year_month)
 
 
 if __name__ == "__main__":
